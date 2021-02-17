@@ -1,0 +1,164 @@
+rm(list=ls())
+library(polycor)
+library(CDM)
+
+##################
+#   Q-matrix   ###
+##################
+
+q = data.ecpe$q.matrix   ### q matrix
+q = as.matrix(q)
+
+######################
+###   Data   #########
+######################
+
+Y = as.matrix(data.ecpe$dat)
+Y = Y[,-1]
+colnames(Y) = NULL
+#Y   ### DATA
+
+
+######################
+###   tetra corr   ###
+######################
+
+het.mat <- hetcor(Y)$cor
+   
+##########################
+###   initial values   ###
+##########################
+principal_component <- function(S, m){
+	p<-nrow(S)
+	diag_S<-diag(S)
+	sum_rank<-sum(diag_S)
+	rowname<-paste("X", 1:p, sep="")
+	colname<-paste("Factor", 1:m, sep="")
+	A<-matrix(0, nrow=p, ncol=m, dimnames=list(rowname, colname))
+	eig<-eigen(S)
+	for (i in 1:m){
+		A[,i]<-sqrt(eig$values[i])*eig$vectors[,i]
+	}
+	h<-diag(A%*%t(A))
+	rowname<-c("SS loadings","Proportion Var","Cumulative Var")
+	B<-matrix(0, nrow=3, ncol=m,
+	dimnames=list(rowname, colname))
+	for (i in 1:m){
+		B[1,i]<-sum(A[,i]^2)
+		B[2,i]<-B[1,i]/sum_rank
+		B[3,i]<-sum(B[1,1:i])/sum_rank
+	}
+	method<-c("Principal Component Method")
+	list(method=method, loadings=A,var=cbind(common=h, specific=diag_S-h), B=B)
+}
+
+#############
+### PCA   ###
+#############
+fac <- principal_component(het.mat, ncol(q))
+ld <- fac$loadings
+ld <- varimax(ld, normalize = F)   ### Varimax rotation
+ld <- ld$loadings
+ld = abs(ld[1:nrow(q),])   ### nrow(q)=30=number of items
+final_matrix2 = ld
+
+####################
+### KL entropy   ###
+####################
+KL_divergence_Lee <- function(A, B){
+  eps <- 1e-6
+  sum(A*log((A + eps)/ (B + eps)) - A + B)
+}
+###############
+###   NMF   ###
+###############
+nmf_lee <- function(V, K, W, H, maxiters = 1000){
+  F <- nrow(V)   ### no. of students
+  N <- ncol(V)   ### no. of items
+  #W <- matrix(rbinom(F*K, 1, 1), nrow = F, ncol = K) 
+  W <- matrix(rgamma(F*K, 1, 1), nrow=F, ncol=K)
+
+  H <- t(final_matrix2)   ### estimates from PCA
+  #H = matrix(rbinom(K*N, 1,0.5), nrow = K, ncol = N) 
+  eps = 1e-05
+  
+  unit_f <- matrix(1, ncol=1, nrow=F)
+  unit_n <- matrix(1, ncol=1, nrow=N)
+  
+  KLlog <- rep(NA, maxiters)
+  for (i in 1:maxiters){
+    #cat("\n iteration:", i, "/", maxiters)
+
+    # update W (matricial)
+    # matlab: W = W .* ((V./(W*H + options.myeps))*H')./(ones(m,1)*sum(H'));
+    W <- W * ((V / (W%*%H + eps)) %*% t(H)) / (unit_f %*% rowSums(H))
+    
+    # update H (matricial)
+    # matlab: H = H .* (W'*(V./(W*H + options.myeps)))./(sum(W)'*ones(1,n));
+    H <- H * (t(W) %*% (V / (W%*%H + eps))) / (colSums(W) %*% t(unit_n))
+    
+
+
+    # Trace KL divergence
+    KLlog[[i]] <- KL_divergence_Lee(V, W%*%H)
+
+########################
+###   Varimax   ########
+########################
+    ld <- t(H)
+    ld <- varimax(ld, normalize = F)   ### Varimax rotation
+    ld <- ld$loadings
+    ld = abs(ld[1:nrow(q),])   ### nrow(q)=30=number of items
+
+#######################
+###   set a = 0.5   ###
+#######################
+    normalized = function(x){(x)/(max(x))}
+    normalized = t(as.matrix(apply(ld, 1, normalized)))
+    h =as.matrix(ifelse(normalized>0.5, 1, 0)) #### max's a half
+    H = t(h)
+  }
+  list(W=W, H=H, KLlog = KLlog)
+}
+############################################################################
+rnmf = nmf_lee(V=Y, K=ncol(q), W, H, maxiters = 50)
+#t(rnmf$H)
+ld = round(t(rnmf$H), digits=3)########## estimated Q-matrix   #############
+#ld 
+
+###############################
+### Reorder   #################
+###############################
+
+permutations <- function(n){
+    if(n==1){
+      return(matrix(1))
+    } else {
+      sp <- permutations(n-1)
+      p <- nrow(sp)
+      A <- matrix(nrow=n*p,ncol=n)
+      for(i in 1:n){
+        A[(i-1)*p+1:p,] <- cbind(i,sp+(sp>=i))
+      }
+      return(A)
+    }
+}
+
+reorder <- function(J=nrow(q), K=ncol(q), a, b){
+    vec.a = matrix(a, ncol=1) #as.vector(a)  # starting p matrix : p.ls
+    vec.b = matrix(b, ncol=1) #as.vector(b)  # matrix of p
+    pm = permutations(K) ## 5x4x3x2x1 = 120
+    tpm =t(pm)
+    vec.b.matrix = matrix(as.vector(b[,c(tpm[,1:factorial(K)])]), J*K, factorial(K))
+    vec.bind.ab = as.matrix(cbind(vec.a, vec.b.matrix))
+    dist.matrix = as.matrix(dist(t(vec.bind.ab), method="euclidean"))
+    ds = dist.matrix[,1]
+    min.value = (min(ds[ds>0]))
+    matrix.number = as.numeric(which(ds == min.value))
+    reorder.b = matrix(vec.b.matrix[, matrix.number-1], J, K)    ## result of reordered matrix  
+    output = list(reorder.b=reorder.b)
+    output$reorder.b ###################
+}
+
+final_Q = reorder(J=nrow(q), K=ncol(q),a=q, b=ld)
+final_Q
